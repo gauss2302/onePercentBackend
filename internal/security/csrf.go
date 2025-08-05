@@ -65,7 +65,6 @@ func (c *CSRFProtection) GinMiddleware() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		r := ctx.Request
 		w := ctx.Writer
-
 		// Safe methods - just set CSRF token
 		if r.Method == http.MethodGet ||
 			r.Method == http.MethodHead ||

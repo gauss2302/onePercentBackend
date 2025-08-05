@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"google.golang.org/api/idtoken"
 	"net/http"
 	"onePercent/config"
 	"onePercent/internal/domain"
@@ -13,7 +14,41 @@ import (
 )
 
 type oauthService struct {
-	config *oauth2.Config
+	config   *oauth2.Config
+	clientID string
+}
+
+func (s *oauthService) VerifyIDToken(ctx context.Context, idToken string) (*domain.GoogleUserInfo, error) {
+	// Check token with Google
+	payload, err := idtoken.Validate(ctx, idToken, s.clientID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid ID token: %w", err)
+	}
+
+	email, ok := payload.Claims["email"].(string)
+	if !ok {
+		return nil, fmt.Errorf("email not found in token")
+	}
+
+	name, ok := payload.Claims["name"].(string)
+	if !ok {
+		return nil, fmt.Errorf("name not found in token")
+	}
+
+	picture, _ := payload.Claims["picture"].(string)
+
+	emailVerified, ok := payload.Claims["email_verified"].(bool)
+	if !ok || !emailVerified {
+		return nil, fmt.Errorf("email not verified")
+	}
+
+	return &domain.GoogleUserInfo{
+		ID:      payload.Subject,
+		Email:   email,
+		Name:    name,
+		Picture: picture,
+	}, nil
+
 }
 
 func NewOAuthService(cfg *config.Config) domain.OAuthService {
@@ -28,6 +63,7 @@ func NewOAuthService(cfg *config.Config) domain.OAuthService {
 			},
 			Endpoint: google.Endpoint,
 		},
+		clientID: cfg.GoogleClientID,
 	}
 }
 

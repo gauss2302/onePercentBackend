@@ -1,4 +1,3 @@
-// cmd/server/main.go
 package main
 
 import (
@@ -30,7 +29,6 @@ type App struct {
 	router *router.Router
 	server *http.Server
 
-	// Resources for cleanup
 	db          *sql.DB
 	redisClient *redisClient.Client
 }
@@ -48,7 +46,6 @@ func main() {
 }
 
 func initializeApp() (*App, error) {
-	// Load configuration
 	cfg := config.Load()
 	log.Printf("Loaded configuration for environment: %s", cfg.Environment)
 

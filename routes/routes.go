@@ -62,6 +62,12 @@ func (r *Router) SetupRoutes() *gin.Engine {
 		// CSRF token endpoint
 		api.GET("/csrf-token", r.csrfProtection.GinMiddleware(), r.getCSRFToken)
 
+		api.GET("/test-core", func(c *gin.Context) {
+			c.JSON(200, gin.H{"message": "auth group works"})
+		})
+
+		api.GET("/empty", r.emptyReq)
+
 		// Auth routes
 		r.setupAuthRoutes(api)
 
@@ -80,6 +86,13 @@ func (r *Router) healthCheck(c *gin.Context) {
 	})
 }
 
+func (r *Router) emptyReq(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"data":       "data Recieved",
+		"timeStapm ": time.Now().Unix(),
+	})
+}
+
 func (r *Router) getCSRFToken(c *gin.Context) {
 	token := security.GetCSRFToken(c)
 	c.JSON(http.StatusOK, gin.H{"csrf_token": token})
@@ -88,14 +101,28 @@ func (r *Router) getCSRFToken(c *gin.Context) {
 func (r *Router) setupAuthRoutes(api *gin.RouterGroup) {
 	auth := api.Group("/auth")
 	{
-		// OAuth endpoints
-		auth.GET("/google", r.authHandler.GoogleAuth)
-		auth.GET("/google/callback", r.csrfProtection.GinMiddleware(), r.authHandler.GoogleCallback)
+		// Тестовый роут для отладки
+		auth.GET("/test", func(c *gin.Context) {
+			c.JSON(200, gin.H{"message": "auth group works"})
+		})
+
+		// ================== WEB OAUTH FLOW ==================
+		webAuth := auth.Group("/web")
+		{
+			webAuth.GET("/google", r.authHandler.GoogleAuth)
+			webAuth.GET("/google/callback", r.csrfProtection.GinMiddleware(), r.authHandler.GoogleCallback)
+			webAuth.POST("/exchange-code", r.csrfProtection.GinMiddleware(), r.authHandler.ExchangeAuthCode)
+		}
+
+		// ================== MOBILE OAUTH FLOW ==================
+		mobileAuth := auth.Group("/mobile")
+		{
+			mobileAuth.POST("/google", r.csrfProtection.GinMiddleware(), r.authHandler.GoogleSignInMobile)
+		}
 
 		// Token management (требует CSRF защиты)
 		auth.POST("/refresh", r.csrfProtection.GinMiddleware(), r.authHandler.RefreshToken)
 		auth.POST("/logout", r.csrfProtection.GinMiddleware(), r.authHandler.Logout)
-		auth.POST("/exchange-code", r.csrfProtection.GinMiddleware(), r.authHandler.ExchangeAuthCode)
 
 		// Refresh token management (требует аутентификации + CSRF)
 		authProtected := auth.Group("/")
@@ -106,6 +133,7 @@ func (r *Router) setupAuthRoutes(api *gin.RouterGroup) {
 			authProtected.DELETE("refresh-tokens/revoke-all", r.csrfProtection.GinMiddleware(), r.authHandler.RevokeAllRefreshTokens)
 		}
 	}
+
 }
 
 func (r *Router) setupProtectedRoutes(api *gin.RouterGroup) {

@@ -73,7 +73,7 @@ func (r *refreshTokenRepository) GetByUserID(ctx context.Context, userID uuid.UU
 	for _, tokenHash := range tokenHashes {
 		token, err := r.GetByToken(ctx, tokenHash)
 		if err != nil {
-			continue // Пропускаем невалидные токены
+			continue
 		}
 		if token != nil && !token.IsRevoked {
 			tokens = append(tokens, token)

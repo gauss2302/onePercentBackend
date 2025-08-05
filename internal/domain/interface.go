@@ -32,6 +32,9 @@ type OAuthService interface {
 	GetAuthURL(state string) string
 	ExchangeCode(ctx context.Context, code string) (*oauth2.Token, error)
 	GetUserInfo(ctx context.Context, token *oauth2.Token) (*GoogleUserInfo, error)
+
+	// Mobile OAuth flow
+	VerifyIDToken(ctx context.Context, idToken string) (*GoogleUserInfo, error)
 }
 
 type AuthService interface {
