@@ -14,6 +14,7 @@ import (
 type Router struct {
 	authHandler    *handler.AuthHandler
 	userHandler    *handler.UserHandler
+	skillHandler   *handler.SkillHandler
 	config         *config.Config
 	rateLimiter    *security.RateLimiter
 	csrfProtection *security.CSRFProtection
@@ -22,6 +23,7 @@ type Router struct {
 func NewRouter(
 	authHandler *handler.AuthHandler,
 	userHandler *handler.UserHandler,
+	skillHandler *handler.SkillHandler,
 	config *config.Config,
 	rateLimiter *security.RateLimiter,
 	csrfProtection *security.CSRFProtection,
@@ -29,6 +31,7 @@ func NewRouter(
 	return &Router{
 		authHandler:    authHandler,
 		userHandler:    userHandler,
+		skillHandler:   skillHandler,
 		config:         config,
 		rateLimiter:    rateLimiter,
 		csrfProtection: csrfProtection,
@@ -143,5 +146,18 @@ func (r *Router) setupProtectedRoutes(api *gin.RouterGroup) {
 		// Profile endpoints (GET безопасен, PUT требует CSRF)
 		protected.GET("profile", r.userHandler.GetProfile)
 		protected.PUT("profile", r.csrfProtection.GinMiddleware(), r.userHandler.UpdateProfile)
+	}
+
+	skills := api.Group("/skills")
+	skills.Use(middleware.AuthMiddleware(r.config.JWTSecret))
+
+	{
+		skills.POST("/", r.csrfProtection.GinMiddleware(), r.skillHandler.CreateSkill)
+		skills.GET("/", r.csrfProtection.GinMiddleware(), r.skillHandler.GetUserSkills)
+		skills.GET("/category/:category", r.csrfProtection.GinMiddleware(), r.skillHandler.GetUserSkillsByCategory)
+		skills.PUT("/:skillID", r.csrfProtection.GinMiddleware(), r.skillHandler.UpdateSkill)
+		skills.DELETE("/:skillID", r.csrfProtection.GinMiddleware(), r.skillHandler.DeleteSkill)
+		skills.DELETE("", r.csrfProtection.GinMiddleware(), r.skillHandler.DeleteAllUserSkills)
+
 	}
 }
