@@ -45,7 +45,6 @@ func (r *Router) SetupRoutes() *gin.Engine {
 
 	router := gin.New()
 
-	// Middleware для продакшна и разработки
 	if r.config.Environment == "production" {
 		router.Use(middleware.RequestLogger())
 		router.Use(middleware.ErrorHandler())
@@ -59,22 +58,12 @@ func (r *Router) SetupRoutes() *gin.Engine {
 
 	api := router.Group("/api/v1")
 	{
-		// Health check endpoint (без защиты)
 		api.GET("/health", r.healthCheck)
 
-		// CSRF token endpoint
 		api.GET("/csrf-token", r.csrfProtection.GinMiddleware(), r.getCSRFToken)
 
-		api.GET("/test-core", func(c *gin.Context) {
-			c.JSON(200, gin.H{"message": "auth group works"})
-		})
-
-		api.GET("/empty", r.emptyReq)
-
-		// Auth routes
 		r.setupAuthRoutes(api)
 
-		// Protected routes
 		r.setupProtectedRoutes(api)
 	}
 
@@ -89,13 +78,6 @@ func (r *Router) healthCheck(c *gin.Context) {
 	})
 }
 
-func (r *Router) emptyReq(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"data":       "data Recieved",
-		"timeStapm ": time.Now().Unix(),
-	})
-}
-
 func (r *Router) getCSRFToken(c *gin.Context) {
 	token := security.GetCSRFToken(c)
 	c.JSON(http.StatusOK, gin.H{"csrf_token": token})
@@ -104,60 +86,101 @@ func (r *Router) getCSRFToken(c *gin.Context) {
 func (r *Router) setupAuthRoutes(api *gin.RouterGroup) {
 	auth := api.Group("/auth")
 	{
-		// Тестовый роут для отладки
-		auth.GET("/test", func(c *gin.Context) {
-			c.JSON(200, gin.H{"message": "auth group works"})
-		})
-
-		// ================== WEB OAUTH FLOW ==================
+		// Web OAuth flow
 		webAuth := auth.Group("/web")
 		{
+			// GET requests don't need CSRF
 			webAuth.GET("/google", r.authHandler.GoogleAuth)
-			webAuth.GET("/google/callback", r.csrfProtection.GinMiddleware(), r.authHandler.GoogleCallback)
+			webAuth.GET("/google/callback", r.authHandler.GoogleCallback)
+
+			// POST request needs CSRF
 			webAuth.POST("/exchange-code", r.csrfProtection.GinMiddleware(), r.authHandler.ExchangeAuthCode)
 		}
 
-		// ================== MOBILE OAUTH FLOW ==================
+		// Mobile OAuth flow
 		mobileAuth := auth.Group("/mobile")
 		{
-			mobileAuth.POST("/google", r.csrfProtection.GinMiddleware(), r.authHandler.GoogleSignInMobile)
+			// Mobile endpoints might not have CSRF tokens initially
+			mobileAuth.POST("/google", r.authHandler.GoogleSignInMobile)
 		}
 
-		// Token management (требует CSRF защиты)
-		auth.POST("/refresh", r.csrfProtection.GinMiddleware(), r.authHandler.RefreshToken)
+		// Token management
+		// IMPORTANT: Refresh endpoint skips CSRF validation but generates new token
+		// The refresh token cookie itself provides security
+		auth.POST("/refresh", r.csrfProtection.SkipCSRFForRefresh(), r.authHandler.RefreshToken)
+
+		// Logout requires CSRF
 		auth.POST("/logout", r.csrfProtection.GinMiddleware(), r.authHandler.Logout)
 
-		// Refresh token management (требует аутентификации + CSRF)
+		// Refresh token management (requires authentication + CSRF)
 		authProtected := auth.Group("/")
 		authProtected.Use(middleware.AuthMiddleware(r.config.JWTSecret))
 		{
-			authProtected.GET("refresh-tokens", r.authHandler.GetRefreshTokens)
-			authProtected.DELETE("refresh-tokens/revoke", r.csrfProtection.GinMiddleware(), r.authHandler.RevokeRefreshToken)
-			authProtected.DELETE("refresh-tokens/revoke-all", r.csrfProtection.GinMiddleware(), r.authHandler.RevokeAllRefreshTokens)
+			authProtected.GET("/refresh-tokens", r.authHandler.GetRefreshTokens)
+			authProtected.DELETE("/refresh-tokens/revoke", r.csrfProtection.GinMiddleware(), r.authHandler.RevokeRefreshToken)
+			authProtected.DELETE("/refresh-tokens/revoke-all", r.csrfProtection.GinMiddleware(), r.authHandler.RevokeAllRefreshTokens)
 		}
 	}
-
 }
 
 func (r *Router) setupProtectedRoutes(api *gin.RouterGroup) {
 	protected := api.Group("/")
 	protected.Use(middleware.AuthMiddleware(r.config.JWTSecret))
 	{
-		// Profile endpoints (GET безопасен, PUT требует CSRF)
-		protected.GET("profile", r.userHandler.GetProfile)
-		protected.PUT("profile", r.csrfProtection.GinMiddleware(), r.userHandler.UpdateProfile)
+		// Profile endpoints (GET is safe, PUT requires CSRF)
+		protected.GET("/profile", r.userHandler.GetProfile)
+		protected.PUT("/profile", r.csrfProtection.GinMiddleware(), r.userHandler.UpdateProfile)
 	}
 
+	// Skills endpoints
 	skills := api.Group("/skills")
 	skills.Use(middleware.AuthMiddleware(r.config.JWTSecret))
-
 	{
 		skills.POST("/", r.csrfProtection.GinMiddleware(), r.skillHandler.CreateSkill)
-		skills.GET("/", r.csrfProtection.GinMiddleware(), r.skillHandler.GetUserSkills)
-		skills.GET("/category/:category", r.csrfProtection.GinMiddleware(), r.skillHandler.GetUserSkillsByCategory)
+		skills.GET("/", r.skillHandler.GetUserSkills)
+		skills.GET("/category/:category", r.skillHandler.GetUserSkillsByCategory)
 		skills.PUT("/:skillID", r.csrfProtection.GinMiddleware(), r.skillHandler.UpdateSkill)
 		skills.DELETE("/:skillID", r.csrfProtection.GinMiddleware(), r.skillHandler.DeleteSkill)
-		skills.DELETE("", r.csrfProtection.GinMiddleware(), r.skillHandler.DeleteAllUserSkills)
+		skills.DELETE("/", r.csrfProtection.GinMiddleware(), r.skillHandler.DeleteAllUserSkills)
+	}
+}
 
+// conditionalCSRF applies CSRF protection but doesn't fail if token is missing
+// This is useful for refresh endpoint where the user might come back after CSRF expired
+func (r *Router) conditionalCSRF() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Try to validate CSRF token if present
+		csrfToken := c.GetHeader("X-CSRF-Token")
+
+		if csrfToken != "" {
+			// Validate the token if provided
+			r.csrfProtection.GinMiddleware()(c)
+
+			// If validation failed, the middleware will abort
+			if c.IsAborted() {
+				return
+			}
+		} else {
+			// No CSRF token provided - for refresh endpoint, we'll allow it
+			// The refresh token itself is the security mechanism
+			// BUT we should set a new CSRF token for future requests
+			token, err := r.csrfProtection.GenerateToken()
+			if err == nil {
+				c.Set("csrf_token", token)
+
+				// Set the cookie for future requests
+				c.SetCookie(
+					"csrf_token",
+					token,
+					86400, // 24 hours
+					"/",
+					"",
+					r.config.CookieSecure,
+					true, // HttpOnly
+				)
+			}
+		}
+
+		c.Next()
 	}
 }

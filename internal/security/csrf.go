@@ -1,3 +1,4 @@
+// internal/security/csrf.go
 package security
 
 import (
@@ -60,11 +61,12 @@ func NewCSRFProtection(config CSRFConfig) *CSRFProtection {
 	}
 }
 
-// Gin middleware for CSRF protection
+// GinMiddleware for CSRF protection
 func (c *CSRFProtection) GinMiddleware() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		r := ctx.Request
 		w := ctx.Writer
+
 		// Safe methods - just set CSRF token
 		if r.Method == http.MethodGet ||
 			r.Method == http.MethodHead ||
@@ -73,7 +75,7 @@ func (c *CSRFProtection) GinMiddleware() gin.HandlerFunc {
 
 			cookie, err := r.Cookie(CSRFCookieName)
 			if err != nil || cookie.Value == "" {
-				token, err := c.generateToken()
+				token, err := c.GenerateToken()
 				if err != nil {
 					ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate CSRF token"})
 					ctx.Abort()
@@ -135,69 +137,34 @@ func (c *CSRFProtection) GinMiddleware() gin.HandlerFunc {
 	}
 }
 
-// Standard HTTP middleware for CSRF protection
-func (c *CSRFProtection) Middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet ||
-			r.Method == http.MethodHead ||
-			r.Method == http.MethodOptions ||
-			r.Method == http.MethodTrace {
-
-			cookie, err := r.Cookie(CSRFCookieName)
-			if err != nil || cookie.Value == "" {
-				token, err := c.generateToken()
-				if err != nil {
-					http.Error(w, "Failed to generate CSRF token", http.StatusInternalServerError)
-					return
-				}
-
-				http.SetCookie(w, &http.Cookie{
-					Name:     CSRFCookieName,
-					Value:    token,
-					Path:     c.config.CookiePath,
-					Domain:   c.config.CookieDomain,
-					MaxAge:   c.config.CookieMaxAge,
-					Secure:   c.config.CookieSecure,
-					HttpOnly: true,
-					SameSite: c.config.CookieSameSite,
-				})
-			}
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// Validation for other methods
-		cookie, err := r.Cookie(CSRFCookieName)
+// SkipCSRFForRefresh is a special middleware for refresh endpoint
+func (c *CSRFProtection) SkipCSRFForRefresh() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		cookie, err := ctx.Request.Cookie(CSRFCookieName)
 		if err != nil || cookie.Value == "" {
-			log.Error().Err(err).Msg("CSRF token cookie missing")
-			http.Error(w, "CSRF token is missing", http.StatusForbidden)
-			return
-		}
-
-		// Check header or form for the token
-		var token string
-		if headerToken := r.Header.Get(CSRFHeaderName); headerToken != "" {
-			token = headerToken
-		} else if formToken := r.FormValue(CSRFFormField); formToken != "" {
-			token = formToken
+			token, err := c.GenerateToken()
+			if err == nil {
+				ctx.SetCookie(
+					CSRFCookieName,
+					token,
+					c.config.CookieMaxAge,
+					c.config.CookiePath,
+					c.config.CookieDomain,
+					c.config.CookieSecure,
+					true, // HttpOnly
+				)
+				ctx.Set("csrf_token", token)
+			}
 		} else {
-			log.Error().Msg("CSRF token is not in header or form")
-			http.Error(w, "CSRF token is missing", http.StatusForbidden)
-			return
+			ctx.Set("csrf_token", cookie.Value)
 		}
 
-		// Validation
-		if err := c.validateToken(token); err != nil {
-			log.Error().Err(err).Msg("CSRF token validation failed")
-			http.Error(w, "Invalid CSRF token", http.StatusForbidden)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
+		ctx.Next()
+	}
 }
 
-func (c *CSRFProtection) generateToken() (string, error) {
+// GenerateToken generates a new CSRF token
+func (c *CSRFProtection) GenerateToken() (string, error) {
 	randomBytes := make([]byte, CSRFTokenLength)
 	if _, err := rand.Read(randomBytes); err != nil {
 		return "", err
@@ -205,16 +172,16 @@ func (c *CSRFProtection) generateToken() (string, error) {
 
 	randomString := base64.StdEncoding.EncodeToString(randomBytes)
 
-	// Payload and time
+	// Payload with timestamp
 	timeStamp := time.Now().Unix()
 	payload := fmt.Sprintf("%s|%d", randomString, timeStamp)
 
-	// Sign
+	// Sign with HMAC
 	h := hmac.New(sha256.New, c.config.Key)
 	h.Write([]byte(payload))
 	sign := base64.StdEncoding.EncodeToString(h.Sum(nil))
 
-	// Payload + sign
+	// Combine payload and signature
 	token := fmt.Sprintf("%s|%s", payload, sign)
 
 	return token, nil
@@ -231,23 +198,24 @@ func (c *CSRFProtection) validateToken(token string) error {
 		return ErrInvalidCSRFToken
 	}
 
-	// Extraction
+	// Extract parts
 	randomStr, timeStampStr, receivedSign := parts[0], parts[1], parts[2]
 	payload := fmt.Sprintf("%s|%s", randomStr, timeStampStr)
 
-	// Sign payload with HMAC 256
+	// Sign payload with HMAC
 	h := hmac.New(sha256.New, c.config.Key)
 	h.Write([]byte(payload))
 	expectedSign := base64.StdEncoding.EncodeToString(h.Sum(nil))
 
-	// Compare
+	// Compare signatures
 	if !hmac.Equal([]byte(receivedSign), []byte(expectedSign)) {
 		return ErrInvalidCSRFToken
 	}
+
 	return nil
 }
 
-// GetToken returns the CSRF token from the context (Gin)
+// GetCSRFToken returns the CSRF token from the context (Gin)
 func GetCSRFToken(c *gin.Context) string {
 	if token, exists := c.Get("csrf_token"); exists {
 		return token.(string)

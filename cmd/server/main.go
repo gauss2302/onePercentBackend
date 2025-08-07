@@ -12,6 +12,7 @@ import (
 	"onePercent/internal/service"
 	"onePercent/pkg/database"
 	"onePercent/pkg/redis"
+	"onePercent/pkg/utils"
 	router "onePercent/routes"
 
 	"log"
@@ -89,20 +90,25 @@ func initializeApp() (*App, error) {
 	})
 	log.Println("Security components initialized")
 
+	validator := utils.NewSkillValidator()
+
 	// Initialize repositories
 	userRepo := repository.NewUserRepository(db)
 	refreshTokenRepo := repository.NewRefreshTokenRepository(redisClient)
+	skillRepo := repository.NewSkillRepository(db)
 
 	// Initialize services
 	oauthService := service.NewOAuthService(cfg)
 	authService := service.NewAuthService(cfg, userRepo, refreshTokenRepo)
+	skillService := service.NewSkillService(skillRepo, validator)
 
 	// Initialize handlers
 	authHandler := handler.NewAuthHandler(oauthService, authService, userRepo, cfg)
 	userHandler := handler.NewUserHandler(userRepo)
+	skillHanlder := handler.NewSkillHandler(skillService)
 
 	// Initialize router
-	appRouter := router.NewRouter(authHandler, userHandler, cfg, rateLimiter, csrfProtection)
+	appRouter := router.NewRouter(authHandler, userHandler, skillHanlder, cfg, rateLimiter, csrfProtection)
 
 	return &App{
 		config:      cfg,

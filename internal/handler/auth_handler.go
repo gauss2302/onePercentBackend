@@ -1,12 +1,12 @@
+// internal/handler/auth_handler.go
 package handler
 
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"onePercent/config"
 	"onePercent/internal/domain"
-
-	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -33,7 +33,18 @@ func NewAuthHandler(oauthService domain.OAuthService, authService domain.AuthSer
 
 func (h *AuthHandler) GoogleAuth(c *gin.Context) {
 	state := uuid.New().String()
-	c.SetCookie("oauth_state", state, 600, "/", "", false, true)
+
+	// Set state cookie for CSRF protection
+	c.SetCookie(
+		"oauth_state",
+		state,
+		600, // 10 minutes
+		"/",
+		"", // domain - empty means current domain
+		h.config.CookieSecure,
+		true, // HttpOnly
+	)
+
 	url := h.oauthService.GetAuthURL(state)
 	c.JSON(http.StatusOK, gin.H{"auth_url": url})
 }
@@ -42,60 +53,74 @@ func (h *AuthHandler) GoogleCallback(c *gin.Context) {
 	state := c.Query("state")
 	code := c.Query("code")
 
-	// Проверка state
+	// Verify state for CSRF protection
 	storedState, err := c.Cookie("oauth_state")
 	if err != nil || state != storedState {
 		h.redirectWithError(c, "invalid_state")
 		return
 	}
 
-	c.SetCookie("oauth_state", "", -1, "/", "", false, true)
+	// Clear the state cookie
+	c.SetCookie("oauth_state", "", -1, "/", "", h.config.CookieSecure, true)
 
-	// Обмен кода на токен
+	// Exchange code for token
 	token, err := h.oauthService.ExchangeCode(c.Request.Context(), code)
 	if err != nil {
 		h.redirectWithError(c, "exchange_failed")
 		return
 	}
 
-	// Получение информации о пользователе
+	// Get user information
 	userInfo, err := h.oauthService.GetUserInfo(c.Request.Context(), token)
 	if err != nil {
 		h.redirectWithError(c, "userinfo_failed")
 		return
 	}
 
-	// Общая логика обработки пользователя
+	// Process user (create or update)
 	user, err := h.processGoogleUser(c.Request.Context(), userInfo)
 	if err != nil {
 		h.redirectWithError(c, "user_processing_failed")
 		return
 	}
 
-	// Генерируем токены
+	// Generate tokens
 	tokenPair, err := h.generateUserTokens(c, user.ID)
 	if err != nil {
 		h.redirectWithError(c, "token_generation_failed")
 		return
 	}
 
+	// Set BOTH tokens as HttpOnly cookies for security
+	// Access token cookie
+	c.SetCookie(
+		"access_token",
+		tokenPair.AccessToken,
+		int(h.config.AccessTokenTTL.Seconds()),
+		"/",
+		"",
+		h.config.CookieSecure,
+		true, // HttpOnly
+	)
+
+	// Refresh token cookie
 	c.SetCookie(
 		"refresh_token",
 		tokenPair.RefreshToken,
 		int(h.config.RefreshTokenTTL.Seconds()),
-		"/",
+		"/api/v1/auth", // Limited to auth endpoints
 		"",
 		h.config.CookieSecure,
-		true,
+		true, // HttpOnly
 	)
 
-	// Временное хранение для веб-клиента
+	// Store temporary auth result for frontend exchange
 	authCode := uuid.New().String()
 	authResult := &domain.AuthResult{
 		User: user,
 		Tokens: &domain.TokenPair{
 			AccessToken:  tokenPair.AccessToken,
-			RefreshToken: "", // НЕ передаем refresh token на фронтенд
+			RefreshToken: "",
 		},
 	}
 
@@ -104,6 +129,7 @@ func (h *AuthHandler) GoogleCallback(c *gin.Context) {
 		return
 	}
 
+	// Redirect to frontend callback
 	frontendURL := fmt.Sprintf("%s/auth/callback?auth_code=%s", h.config.FrontendURL, authCode)
 	c.Redirect(http.StatusTemporaryRedirect, frontendURL)
 }
@@ -124,9 +150,14 @@ func (h *AuthHandler) ExchangeAuthCode(c *gin.Context) {
 		return
 	}
 
+	// Return user info and access token for frontend state
+	// Refresh token is already set as HttpOnly cookie
 	c.JSON(http.StatusOK, gin.H{
-		"user":   authResult.User,
-		"tokens": authResult.Tokens,
+		"user": authResult.User,
+		"tokens": gin.H{
+			"access_token": authResult.Tokens.AccessToken,
+			// Don't include refresh_token here
+		},
 	})
 }
 
@@ -172,64 +203,105 @@ func (h *AuthHandler) GoogleSignInMobile(c *gin.Context) {
 		return
 	}
 
+	// For mobile, return tokens in response body
 	c.JSON(http.StatusOK, gin.H{
 		"user":   user,
 		"tokens": tokenPair,
 	})
-
 }
 
 func (h *AuthHandler) RefreshToken(c *gin.Context) {
-	refreshTokenCookie, err := c.Cookie("refresh_token")
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "No refresh token found"})
+	// Try to get refresh token from cookie first (web flow)
+	refreshToken, err := c.Cookie("refresh_token")
+
+	// If not in cookie, check request body (mobile flow)
+	if err != nil || refreshToken == "" {
+		var req struct {
+			RefreshToken string `json:"refresh_token"`
+		}
+		if err := c.ShouldBindJSON(&req); err == nil && req.RefreshToken != "" {
+			refreshToken = req.RefreshToken
+		}
+	}
+
+	if refreshToken == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "No refresh token provided"})
 		return
 	}
 
 	userAgent := c.GetHeader("User-Agent")
 	ipAddress := c.ClientIP()
 
-	tokenPair, err := h.authService.RefreshAccessToken(refreshTokenCookie, userAgent, ipAddress)
+	tokenPair, err := h.authService.RefreshAccessToken(refreshToken, userAgent, ipAddress)
 	if err != nil {
-		// Чиста невалидного токена
-		c.SetCookie("refresh_token", "", -1, "/", "", h.config.CookieSecure, true)
+		// Clear invalid cookies
+		c.SetCookie("access_token", "", -1, "/", "", h.config.CookieSecure, true)
+		c.SetCookie("refresh_token", "", -1, "/api/v1/auth", "", h.config.CookieSecure, true)
+
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid refresh token"})
 		return
 	}
 
-	// Новый токен в куку
+	// Set new cookies for web clients
+	c.SetCookie(
+		"access_token",
+		tokenPair.AccessToken,
+		int(h.config.AccessTokenTTL.Seconds()),
+		"/",
+		"",
+		h.config.CookieSecure,
+		true,
+	)
+
 	c.SetCookie(
 		"refresh_token",
 		tokenPair.RefreshToken,
 		int(h.config.RefreshTokenTTL.Seconds()),
-		"/",
+		"/api/v1/auth",
 		"",
 		h.config.CookieSecure,
-		true)
+		true,
+	)
 
+	// Return tokens in response for both web and mobile
 	c.JSON(http.StatusOK, gin.H{
 		"tokens": gin.H{
 			"access_token": tokenPair.AccessToken,
+			// Mobile clients get refresh token in body
+			"refresh_token": tokenPair.RefreshToken,
 		},
 	})
 }
 
 func (h *AuthHandler) Logout(c *gin.Context) {
-	refreshTokenCookie, err := c.Cookie("refresh_token")
-	if err == nil && refreshTokenCookie != "" {
-		// Отзываем refresh token на сервере
-		err := h.authService.RevokeRefreshToken(refreshTokenCookie)
-		if err != nil {
-			fmt.Sprintf("Error revoke refresh token: %s", err)
-			return
+	// Get refresh token from cookie or body
+	refreshToken, err := c.Cookie("refresh_token")
+	if err != nil || refreshToken == "" {
+		var req struct {
+			RefreshToken string `json:"refresh_token"`
+		}
+		if err := c.ShouldBindJSON(&req); err == nil {
+			refreshToken = req.RefreshToken
 		}
 	}
 
-	// Очищаем cookie
-	c.SetCookie("refresh_token", "", -1, "/", "", h.config.CookieSecure, true)
+	if refreshToken != "" {
+		// Revoke refresh token on server
+		if err := h.authService.RevokeRefreshToken(refreshToken); err != nil {
+			// Log error but continue with logout
+			fmt.Printf("Error revoking refresh token: %s\n", err)
+		}
+	}
+
+	// Clear all auth cookies
+	c.SetCookie("access_token", "", -1, "/", "", h.config.CookieSecure, true)
+	c.SetCookie("refresh_token", "", -1, "/api/v1/auth", "", h.config.CookieSecure, true)
+	c.SetCookie("oauth_state", "", -1, "/", "", h.config.CookieSecure, true)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
 }
+
+// Rest of the methods remain the same...
 
 func (h *AuthHandler) GetRefreshTokens(c *gin.Context) {
 	userID, exists := c.Get("user_id")
@@ -263,7 +335,7 @@ func (h *AuthHandler) RevokeRefreshToken(c *gin.Context) {
 		return
 	}
 
-	// Проверяем, что токен принадлежит пользователю
+	// Verify token ownership
 	isOwner, err := h.authService.VerifyRefreshTokenOwnership(req.RefreshToken, userID.(uuid.UUID))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify token ownership"})
@@ -324,14 +396,14 @@ func (h *AuthHandler) processGoogleUser(ctx context.Context, userInfo *domain.Go
 		return existingUser, nil
 	}
 
+	// Check if user with email exists
 	existingEmailUser, err := h.userRepo.GetByEmail(ctx, userInfo.Email)
 	if err != nil {
 		return nil, fmt.Errorf("database error when checking email: %w", err)
 	}
 
 	if existingEmailUser != nil {
-		// Пользователь с таким email уже существует, но без Google ID
-		// Связываем аккаунты
+		// Link Google account to existing user
 		existingEmailUser.GoogleID = userInfo.ID
 		existingEmailUser.Name = userInfo.Name
 		existingEmailUser.Picture = userInfo.Picture
@@ -344,6 +416,7 @@ func (h *AuthHandler) processGoogleUser(ctx context.Context, userInfo *domain.Go
 		return existingEmailUser, nil
 	}
 
+	// Create new user
 	user := &domain.User{
 		ID:        uuid.New(),
 		GoogleID:  userInfo.ID,
@@ -359,7 +432,6 @@ func (h *AuthHandler) processGoogleUser(ctx context.Context, userInfo *domain.Go
 	}
 
 	return user, nil
-
 }
 
 func (h *AuthHandler) redirectWithError(c *gin.Context, errorType string) {
