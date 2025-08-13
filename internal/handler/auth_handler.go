@@ -50,6 +50,7 @@ func (h *AuthHandler) GoogleAuth(c *gin.Context) {
 }
 
 func (h *AuthHandler) GoogleCallback(c *gin.Context) {
+	ctx := c.Request.Context()
 	state := c.Query("state")
 	code := c.Query("code")
 
@@ -64,21 +65,21 @@ func (h *AuthHandler) GoogleCallback(c *gin.Context) {
 	c.SetCookie("oauth_state", "", -1, "/", "", h.config.CookieSecure, true)
 
 	// Exchange code for token
-	token, err := h.oauthService.ExchangeCode(c.Request.Context(), code)
+	token, err := h.oauthService.ExchangeCode(ctx, code)
 	if err != nil {
 		h.redirectWithError(c, "exchange_failed")
 		return
 	}
 
 	// Get user information
-	userInfo, err := h.oauthService.GetUserInfo(c.Request.Context(), token)
+	userInfo, err := h.oauthService.GetUserInfo(ctx, token)
 	if err != nil {
 		h.redirectWithError(c, "userinfo_failed")
 		return
 	}
 
 	// Process user (create or update)
-	user, err := h.processGoogleUser(c.Request.Context(), userInfo)
+	user, err := h.processGoogleUser(ctx, userInfo)
 	if err != nil {
 		h.redirectWithError(c, "user_processing_failed")
 		return
@@ -124,7 +125,7 @@ func (h *AuthHandler) GoogleCallback(c *gin.Context) {
 		},
 	}
 
-	if err := h.authService.StoreTemporaryAuth(authCode, authResult, 5*time.Minute); err != nil {
+	if err := h.authService.StoreTemporaryAuth(ctx, authCode, authResult, 5*time.Minute); err != nil {
 		h.redirectWithError(c, "storage_failed")
 		return
 	}
@@ -156,7 +157,6 @@ func (h *AuthHandler) ExchangeAuthCode(c *gin.Context) {
 		"user": authResult.User,
 		"tokens": gin.H{
 			"access_token": authResult.Tokens.AccessToken,
-			// Don't include refresh_token here
 		},
 	})
 }
@@ -300,8 +300,6 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
 }
-
-// Rest of the methods remain the same...
 
 func (h *AuthHandler) GetRefreshTokens(c *gin.Context) {
 	userID, exists := c.Get("user_id")

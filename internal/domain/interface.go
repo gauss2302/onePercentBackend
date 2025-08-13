@@ -44,7 +44,7 @@ type AuthService interface {
 	RevokeRefreshToken(refreshToken string) error
 	GetUserRefreshTokens(userID uuid.UUID) ([]*RefreshToken, error)
 	RevokeAllUserRefreshTokens(userID uuid.UUID) error
-	StoreTemporaryAuth(authCode string, authResult *AuthResult, expiration time.Duration) error
+	StoreTemporaryAuth(ctx context.Context, authCode string, authResult *AuthResult, expiration time.Duration) error
 	ExchangeAuthCode(authCode string) (*AuthResult, error)
 	CleanupExpiredTokens() error
 	VerifyRefreshTokenOwnership(refreshTokenStr string, userID uuid.UUID) (bool, error)

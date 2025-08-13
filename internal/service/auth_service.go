@@ -38,13 +38,13 @@ func NewAuthService(cfg *config.Config, userRepo domain.UserRepository, refreshT
 	}
 }
 
-func (s *authService) StoreTemporaryAuth(authCode string, authResult *domain.AuthResult, expiration time.Duration) error {
+func (s *authService) StoreTemporaryAuth(ctx context.Context, authCode string, authResult *domain.AuthResult, expiration time.Duration) error {
 	authResultJSON, err := json.Marshal(authResult)
 	if err != nil {
 		return err
 	}
 
-	return s.refreshTokenRepo.StoreTemporaryAuth(context.Background(), authCode, string(authResultJSON), expiration)
+	return s.refreshTokenRepo.StoreTemporaryAuth(ctx, authCode, string(authResultJSON), expiration)
 }
 
 func (s *authService) ExchangeAuthCode(authCode string) (*domain.AuthResult, error) {
@@ -109,6 +109,8 @@ func (s *authService) generateAccessToken(userID uuid.UUID, tokenID string) (str
 		UserID:  userID,
 		TokenID: tokenID,
 		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    "onepercent.api",
+			Audience:  []string{"onepercent.web", "onepercent.mobile"},
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(s.accessTokenTTL)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			Subject:   userID.String(),
